@@ -38,39 +38,63 @@ def get_vector_store(pdf_path):
 
     if not os.path.exists(VECTOR_STORE_PATH):
         print("Membuat vector store baru dari PDF. Proses ini mungkin memakan waktu beberapa menit...")
+
+        # memuat dokumen format pdf
         loader = PyPDFLoader(pdf_path)
         pages = loader.load_and_split()
         
+        # inisialisasi text splitter
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-        context = "\n".join(str(p.page_content) for p in pages)
-        texts = text_splitter.split_text(context)
+        # context = "\n".join(str(p.page_content) for p in pages)
+        # texts = text_splitter.split_text(context)
+
+        # memecah dokumen
+        chunks = text_splitter.split_documents(pages)
         
-        vector_store = Chroma.from_texts(texts, embeddings, persist_directory=VECTOR_STORE_PATH)
+        # buat vector store dari pecahan dokumen
+        vector_store = Chroma.from_documents(documents=chunks, 
+                                            embedding=embeddings,
+                                            persist_directory=VECTOR_STORE_PATH)
         print("Vector store berhasil dibuat dan disimpan!")
     else:
         print("Memuat vector store yang sudah ada...")
         vector_store = Chroma(persist_directory=VECTOR_STORE_PATH, embedding_function=embeddings)
         print("Vector store berhasil dimuat!")
 
-    return vector_store.as_retriever(search_kwargs={"k": 5})
+    return vector_store.as_retriever(search_type="similarity_score_threshold",
+                                    search_kwargs={"score_threshold": 0.7})
 
 
 def get_conversational_chain():
     """
     Fungsi ini membuat QA chain menggunakan LCEL (LangChain Expression Language) dan mengimplementasi riwayat chat.
     """
-    prompt_template = """
-    Anda adalah asisten AI yang menjawab pertanyaan dari dokumen yang diberikan.
-    Jawab pertanyaan berdasarkan konteks yang diberikan. Pastikan untuk memberikan jawaban yang paling akurat. 
-    Jika jawaban tidak ditemukan dalam konteks, katakan, "Jawaban tidak tersedia dalam konteks". Jangan mengarang jawaban.\n\n
-    Konteks:\n {context}?\n
-    Pertanyaan: \n{question}\n
+    # prompt_template = """
+    # Anda adalah asisten AI yang menjawab pertanyaan dari dokumen yang diberikan.
+    # Jawab pertanyaan berdasarkan konteks yang diberikan. Pastikan untuk memberikan jawaban yang paling akurat. 
+    # Jika jawaban tidak ditemukan dalam konteks, katakan, "Jawaban tidak tersedia dalam konteks". Jangan mengarang jawaban.\n\n
+    # Konteks:\n {context}?\n
+    # Pertanyaan: \n{question}\n
 
-    Jawaban:
-    """
+    # Jawaban:
+    # """
+
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessage(
+            content="""
+            Anda adalah asisten AI ahli yang menjawab pertanyaan berdasarkan dokumen hukum.
+            Gunakan hanya potongan-potongan konteks yang relevan di bawah ini untuk menjawab pertanyaan.
+            Abaikan konteks yang berisi "Cukup jelas" atau yang tidak berhubungan dengan pertanyaan.
+            Jika setelah mengabaikan konteks yang tidak relevan, jawaban masih tidak ditemukan, katakan, "Jawaban tidak tersedia dalam dokumen."
+            Jangan mengarang jawaban.\n\n
+            """
+        ),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}")
+    ])
     
     model = init_chat_model(model="gemini-2.5-pro", temperature=0.3, model_provider="google_genai")
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    # prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     output_parser = StrOutputParser() # Inisialisasi parser
 
     def format_docs(docs):
@@ -81,7 +105,7 @@ def get_conversational_chain():
     chain = (
         # Input: {"input_documents": ..., "question": ...}
         # Output dari langkah pertama: {"context": ..., "question": ...}
-        {"context": lambda x: format_docs(x["input_documents"]), "question": lambda x: x["question"]}
+        {"context": lambda x: format_docs(x["input_documents"]), "question": lambda x: x["question"], "chat_history": lambda x: x["chat_history"]}
         | prompt          # Masukkan ke prompt
         | model           # Kirim ke model LLM
         | output_parser   # Ambil output sebagai string
@@ -92,8 +116,6 @@ def get_conversational_chain():
 
 def main():
     pdf_path = "data/uu_lalin.pdf"
-    pertanyaan_tes = "Sebutkan jenis-jenis surat izin mengemudi dan diatur dalam pasal berapa?"
-
     print("--- Memulai Proses RAG di Terminal ---")
     
     if not os.path.exists(pdf_path):
@@ -103,22 +125,43 @@ def main():
     print(f"1. Memproses atau memuat vector store...")
     retriever = get_vector_store(pdf_path)
 
-    print(f"\n2. Mencari konteks relevan untuk pertanyaan...")
-    docs = retriever.invoke(pertanyaan_tes)
-    
-    print("\n3. Menyiapkan QA chain dengan LCEL...")
+    print(f"\n2. Menyiapkan QA Chain")
     chain = get_conversational_chain()
-    print("   Chain siap digunakan.")
+    print("   Chain siap digunakan. Ketik Pertanyaan dan ketik exit untuk mengakhiri.")
 
-    print("\n4. Mengirim permintaan ke Gemini...")
-    # Menjalankan chain dengan input yang dibutuhkan
-    response = chain.invoke({"input_documents": docs, "question": pertanyaan_tes})
-    
-    # Hasil 'response' sekarang adalah string langsung, bukan dictionary
-    print("\n--- JAWABAN DARI GEMINI ---")
-    print(response)
-    print("--------------------------")
+    # inisialisasi list untuk riwayat chat
+    chat_history = []
 
+    while True:
+        user_question = input("Pertanyaan: ")
+        if user_question.lower() == "exit":
+            print("Terima kasih! Aplikasi selesai.")
+            break
+
+        print("AI: Mencari jawaban...")
+        docs = retriever.invoke(user_question)
+
+        # menjalankan chain dengan riwayat chat
+        response = chain.invoke({
+            "input_documents": docs,
+            "question": user_question,
+            "chat_history": chat_history
+        })
+
+        print(f"AI: {response}")
+
+        # menambahkan pertanyaan dan jawaban ke riwayat
+        chat_history.append(HumanMessage(content=user_question))
+        chat_history.append(AIMessage(content=response))
+
+        # fungsi untuk menampilkan sumber (source citation)
+        print("\n --- Sumber Jawaban ---")
+        for i, doc in enumerate(docs):
+            page_number = doc.metadata.get("page", "Tidak Diketahui")
+            print(f" Sumber #{i+1} (Halaman: {page_number})")
+            # mencetak 100 karakter pertama dari sumber
+            print(f"'{doc.page_content[:100]}...'")
+            print("------------------------------")
 
 if __name__ == "__main__":
     main()
