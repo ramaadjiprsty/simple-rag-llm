@@ -1,22 +1,16 @@
-# app.py atau test_terminal.py (Versi Terbaru)
-
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
-
 # LangChain imports (dengan tambahan StrOutputParser)
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 # from langchain_community.vectorstores import Chroma
 from langchain_chroma import Chroma
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser # Impor parser output
-
 from langchain.chat_models import init_chat_model
-
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # Muat environment variables dari file .env
 load_dotenv()
@@ -29,19 +23,43 @@ else:
     genai.configure(api_key=api_key)
 
 
-def get_vector_store(pdf_path):
+def get_vector_store(data_folder_path):
     """
-    Fungsi ini membuat atau memuat vector store yang sudah ada.
+    Fungsi menggunakan indo-sentencte-bert (via HuggingFaceEmbeddings)
+    sebagai model untuk membuat embeddings.
     """
     VECTOR_STORE_PATH = "vector_store/"
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+    # initiate indobert model
+    print("Menginisialisasi model IndoBERT...")
+    model_name = "firqaaa/indo-sentence-bert-base"
+
+    model_kwargs = {"device": "cpu"}
+    encode_kwargs = {"normalize_embeddings": True}
+
+    embeddings = HuggingFaceEmbeddings(
+        model = model_name,
+        model_kwargs = model_kwargs,
+        encode_kwargs = encode_kwargs
+    )
+    print("Indobert berhasil diinisialisasi!")
 
     if not os.path.exists(VECTOR_STORE_PATH):
         print("Membuat vector store baru dari PDF. Proses ini mungkin memakan waktu beberapa menit...")
 
-        # memuat dokumen format pdf
-        loader = PyPDFLoader(pdf_path)
-        pages = loader.load_and_split()
+        all_pages = []
+        pdf_files = [f for f in os.listdir(data_folder_path) if f.endswith(".pdf")]
+
+        if not pdf_files:
+            raise ValueError(f"Tidak ada file PDF di dalam direktori: {data_folder_path}")
+        
+        print("PDF File ditemukan...")
+
+        for pdf_file in pdf_files:
+            pdf_path = os.path.join(data_folder_path, pdf_file)
+            print(f" -  Memuat {pdf_file}...")
+            loader = PyPDFLoader(pdf_path)
+            all_pages.extend(loader.load())
         
         # inisialisasi text splitter
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
@@ -49,7 +67,8 @@ def get_vector_store(pdf_path):
         # texts = text_splitter.split_text(context)
 
         # memecah dokumen
-        chunks = text_splitter.split_documents(pages)
+        print("Memecah dokumen...")
+        chunks = text_splitter.split_documents(all_pages)
         
         # buat vector store dari pecahan dokumen
         vector_store = Chroma.from_documents(documents=chunks, 
@@ -62,23 +81,13 @@ def get_vector_store(pdf_path):
         print("Vector store berhasil dimuat!")
 
     return vector_store.as_retriever(search_type="similarity_score_threshold",
-                                    search_kwargs={"score_threshold": 0.7})
+                                    search_kwargs={"score_threshold": 0.5})
 
 
 def get_conversational_chain():
     """
     Fungsi ini membuat QA chain menggunakan LCEL (LangChain Expression Language) dan mengimplementasi riwayat chat.
     """
-    # prompt_template = """
-    # Anda adalah asisten AI yang menjawab pertanyaan dari dokumen yang diberikan.
-    # Jawab pertanyaan berdasarkan konteks yang diberikan. Pastikan untuk memberikan jawaban yang paling akurat. 
-    # Jika jawaban tidak ditemukan dalam konteks, katakan, "Jawaban tidak tersedia dalam konteks". Jangan mengarang jawaban.\n\n
-    # Konteks:\n {context}?\n
-    # Pertanyaan: \n{question}\n
-
-    # Jawaban:
-    # """
-
     prompt = ChatPromptTemplate.from_messages([
         SystemMessage(
             content="""
@@ -94,7 +103,6 @@ def get_conversational_chain():
     ])
     
     model = init_chat_model(model="gemini-2.5-pro", temperature=0.3, model_provider="google_genai")
-    # prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
     output_parser = StrOutputParser() # Inisialisasi parser
 
     def format_docs(docs):
@@ -115,15 +123,15 @@ def get_conversational_chain():
 
 
 def main():
-    pdf_path = "data/uu_lalin.pdf"
+    data_folder_path = "data/"
     print("--- Memulai Proses RAG di Terminal ---")
     
-    if not os.path.exists(pdf_path):
-        print(f"Error: File tidak ditemukan di path: {pdf_path}")
+    if not os.path.exists(data_folder_path):
+        print(f"Error: File tidak ditemukan di path: {data_folder_path}")
         return
 
     print(f"1. Memproses atau memuat vector store...")
-    retriever = get_vector_store(pdf_path)
+    retriever = get_vector_store(data_folder_path)
 
     print(f"\n2. Menyiapkan QA Chain")
     chain = get_conversational_chain()
